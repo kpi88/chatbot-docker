@@ -1,0 +1,347 @@
+###
+#  Chatbot-UI with Supabase
+###
+
+name: chatbot-ui-supabase
+version: "3.8"
+services:
+
+  db:
+    container_name: ${CONTAINER_PREFIX}_db_${CONTAINER_POSTFIX}
+    image: docker.io/supabase/postgres:15.1.0.147
+    healthcheck:
+      test: pg_isready -U postgres -h localhost
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    command:
+      - postgres
+      - -c
+      - config_file=/etc/postgresql/postgresql.conf
+      - -c
+      - search_path=\"$user\",public,extensions
+    entrypoint: [ "sh", "-c", "docker-entrypoint.sh postgres -D /etc/postgresql"]
+    restart: unless-stopped
+    environment:
+      POSTGRES_HOST: /var/run/postgresql
+      PGPORT: ${POSTGRES_PORT}
+      POSTGRES_PORT: ${POSTGRES_PORT}
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      PGDATABASE: ${POSTGRES_DB}
+      POSTGRES_DB: ${POSTGRES_DB}
+      JWT_SECRET: ${JWT_SECRET}
+      JWT_EXP: ${JWT_EXPIRY}
+    volumes:
+     # PGDATA directory is persisted between restarts
+      - ./volume/db/data:/var/lib/postgresql/data:Z
+      - ./postgresql.schema.sql:/docker-entrypoint-initdb.d/init-scripts/98-postgresql.schema.sql:Z
+      - ./realtime.sql:/docker-entrypoint-initdb.d/migrations/99-realtime.sql:Z
+
+  rest:
+    container_name: ${CONTAINER_PREFIX}_rest_${CONTAINER_POSTFIX}
+    image: docker.io/postgrest/postgrest:v12.0.1
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+    environment:
+      PGRST_DB_URI: postgres://authenticator:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${POSTGRES_DB}
+      PGRST_DB_SCHEMAS: ${PGRST_DB_SCHEMAS}
+      PGRST_DB_ANON_ROLE: anon
+      # next two lines added by chatbot-ui/supabase/config.toml
+      PGRST_DB_EXTRA_SEARCH_PATH: public,extensions
+      PGRST_DB_MAX_ROWS: 1000
+      PGRST_JWT_SECRET: ${JWT_SECRET}
+    command: "/bin/postgrest"
+
+  imgproxy:
+    container_name: storage_imgproxy_${CONTAINER_POSTFIX}
+    image: docker.io/darthsim/imgproxy:v3.8.0
+    healthcheck:
+      test: [ "CMD", "imgproxy", "health" ]
+      timeout: 5s
+      interval: 5s
+      retries: 3
+    environment:
+      IMGPROXY_BIND: ":5001"
+      IMGPROXY_LOCAL_FILESYSTEM_ROOT: /
+      IMGPROXY_USE_ETAG: "/"
+      IMGPROXY_ENABLE_WEBP_DETECTION: ${IMGPROXY_ENABLE_WEBP_DETECTION}
+    volumes:
+      - ./volume/storage:/var/lib/storage:z
+
+  storage:
+    container_name: ${CONTAINER_PREFIX}_storage_${CONTAINER_POSTFIX}
+    image: docker.io/supabase/storage-api:v0.46.4
+    depends_on:
+      db:
+        condition: service_healthy
+      rest:
+        condition: service_started
+      imgproxy:
+        condition: service_started
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "wget",
+          "--no-verbose",
+          "--tries=1",
+          "--spider",
+          "http://${CONTAINER_PREFIX}_storage_${CONTAINER_POSTFIX}:5000/status"
+        ]
+      timeout: 5s
+      interval: 5s
+      retries: 3
+    restart: unless-stopped
+    environment:
+      ANON_KEY: ${ANON_KEY}
+      SERVICE_KEY: ${SERVICE_ROLE_KEY}
+      POSTGREST_URL: http://supabase_rest_chatbotui:3000
+      PGRST_JWT_SECRET: ${JWT_SECRET}
+      DATABASE_URL: postgres://supabase_storage_admin:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${POSTGRES_DB}
+      FILE_SIZE_LIMIT: 52428800
+      STORAGE_BACKEND: file
+      FILE_STORAGE_BACKEND_PATH: /var/lib/storage
+      TENANT_ID: stub
+      # TODO: https://github.com/supabase/storage-api/issues/55
+      REGION: stub
+      GLOBAL_S3_BUCKET: stub
+      ENABLE_IMAGE_TRANSFORMATION: "true"
+      IMGPROXY_URL: http://storage_imgproxy_${CONTAINER_POSTFIX}:5001
+    volumes:
+      - ./volume/storage:/var/lib/storage:z
+
+  studio:
+    container_name: ${CONTAINER_PREFIX}_studio_${CONTAINER_POSTFIX}
+    image: docker.io/supabase/studio:20240101-8e4a094
+    restart: unless-stopped
+    depends_on:
+      - chatbot
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "require('http').get('http://${CONTAINER_PREFIX}_${CHATBOTUI_SUBDOMAIN}.${DOMAIN}_${CONTAINER_POSTFIX}:3000/api/profile', (r) => {if (r.statusCode !== 200) throw new Error(r.statusCode)})"
+        ]
+      timeout: 5s
+      interval: 5s
+      retries: 3
+    environment:
+      STUDIO_PG_META_URL: http://${CONTAINER_PREFIX}_pg_meta_${CONTAINER_POSTFIX}:8080
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+
+      SUPABASE_URL: ${KONG_INTERNAL_URL}
+      SUPABASE_PUBLIC_URL: ${SUPABASE_PUBLIC_URL}
+      SUPABASE_ANON_KEY: ${ANON_KEY}
+      SUPABASE_SERVICE_KEY: ${SERVICE_ROLE_KEY}
+      SUPABASE_REST_URL: ${KONG_INTERNAL_URL}/rest/v1/
+      NEXT_PUBLIC_ENABLE_LOGS: false
+      NEXT_ANALYTICS_BACKEND_PROVIDER: postgres
+
+  kong:
+    container_name: ${CONTAINER_PREFIX}_kong_${CONTAINER_POSTFIX}
+    image: docker.io/library/kong:2.8.1
+    restart: unless-stopped
+    # https://unix.stackexchange.com/a/294837
+    entrypoint: [ "bash", "-c", "/docker-entrypoint.sh kong docker-start --nginx-conf /home/kong/custom_nginx.template" ]
+    environment:
+      KONG_DATABASE: "off"
+      KONG_DECLARATIVE_CONFIG: /home/kong/kong.yml
+      # https://github.com/supabase/cli/issues/14
+      KONG_DNS_ORDER: LAST,A,CNAME
+      KONG_PLUGINS: request-transformer,cors
+      KONG_NGINX_PROXY_PROXY_BUFFER_SIZE: 160k
+      KONG_NGINX_PROXY_PROXY_BUFFERS: 64 160k
+    volumes:
+      - ./kong.yml:/home/kong/kong.yml:Z
+      - ./custom_nginx.template:/home/kong/custom_nginx.template:Z
+
+  auth:
+    container_name: ${CONTAINER_PREFIX}_auth_${CONTAINER_POSTFIX}
+    image: docker.io/supabase/gotrue:v2.132.3
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "wget",
+          "--no-verbose",
+          "--tries=1",
+          "--spider",
+          "http://localhost:9999/health"
+        ]
+      timeout: 5s
+      interval: 5s
+      retries: 3
+    restart: unless-stopped
+    environment:
+      GOTRUE_API_HOST: 0.0.0.0
+      GOTRUE_API_PORT: 9999
+      API_EXTERNAL_URL: ${API_EXTERNAL_URL}
+
+      GOTRUE_DB_DRIVER: postgres
+      GOTRUE_DB_DATABASE_URL: postgres://supabase_auth_admin:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${POSTGRES_DB}
+
+      GOTRUE_SITE_URL: ${SITE_URL}
+      GOTRUE_URI_ALLOW_LIST: ${ADDITIONAL_REDIRECT_URLS}
+      GOTRUE_DISABLE_SIGNUP: ${DISABLE_SIGNUP}
+
+      GOTRUE_JWT_ADMIN_ROLES: service_role
+      GOTRUE_JWT_AUD: authenticated
+      GOTRUE_JWT_DEFAULT_GROUP_NAME: authenticated
+      GOTRUE_JWT_EXP: ${JWT_EXPIRY}
+      GOTRUE_JWT_SECRET: ${JWT_SECRET}
+
+      GOTRUE_EXTERNAL_EMAIL_ENABLED: ${ENABLE_EMAIL_SIGNUP}
+      GOTRUE_MAILER_AUTOCONFIRM: ${ENABLE_EMAIL_AUTOCONFIRM}
+      GOTRUE_SMTP_ADMIN_EMAIL: ${SMTP_ADMIN_EMAIL}
+      GOTRUE_SMTP_HOST: ${SMTP_HOST}
+      GOTRUE_SMTP_PORT: ${SMTP_PORT}
+      GOTRUE_SMTP_USER: ${SMTP_USER}
+      GOTRUE_SMTP_PASS: ${SMTP_PASS}
+      GOTRUE_SMTP_SENDER_NAME: ${SMTP_SENDER_NAME}
+      GOTRUE_MAILER_URLPATHS_INVITE: ${MAILER_URLPATHS_INVITE}
+      GOTRUE_MAILER_URLPATHS_CONFIRMATION: ${MAILER_URLPATHS_CONFIRMATION}
+      GOTRUE_MAILER_URLPATHS_RECOVERY: ${MAILER_URLPATHS_RECOVERY}
+      GOTRUE_MAILER_URLPATHS_EMAIL_CHANGE: ${MAILER_URLPATHS_EMAIL_CHANGE}
+
+      GOTRUE_EXTERNAL_PHONE_ENABLED: ${ENABLE_PHONE_SIGNUP}
+      GOTRUE_SMS_AUTOCONFIRM: ${ENABLE_PHONE_AUTOCONFIRM}
+
+  realtime:
+    container_name: realtime-dev.${CONTAINER_PREFIX}_realtime_${CONTAINER_POSTFIX}
+    image: docker.io/supabase/realtime:v2.25.50
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "bash",
+          "-c",
+          "printf \\0 > /dev/tcp/localhost/4000"
+        ]
+      timeout: 5s
+      interval: 5s
+      retries: 3
+    restart: unless-stopped
+    environment:
+      PORT: 4000
+      DB_HOST: ${POSTGRES_HOST}
+      DB_PORT: ${POSTGRES_PORT}
+      DB_USER: supabase_admin
+      DB_PASSWORD: ${POSTGRES_PASSWORD}
+      DB_NAME: ${POSTGRES_DB}
+      DB_AFTER_CONNECT_QUERY: 'SET search_path TO _realtime'
+      DB_ENC_KEY: supabaserealtime
+      API_JWT_SECRET: ${JWT_SECRET}
+      FLY_ALLOC_ID: abc123
+      FLY_APP_NAME: realtime
+      SECRET_KEY_BASE: UpNVntn3cDxHJpq99YMc1T1AQgQpc8kfYTuRgBiYa15BLrx8etQoXz3gZv1/u2oq
+      ERL_AFLAGS: -proto_dist inet_tcp
+      ENABLE_TAILSCALE: "false"
+      DNS_NODES: "''"
+    command: >
+      sh -c "/app/bin/migrate && /app/bin/realtime eval 'Realtime.Release.seeds(Realtime.Repo)' && /app/bin/server"
+
+  meta:
+    container_name: ${CONTAINER_PREFIX}_pg_meta_${CONTAINER_POSTFIX}
+    image: docker.io/supabase/postgres-meta:v0.75.0
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+    environment:
+      PG_META_PORT: 8080
+      PG_META_DB_HOST: ${POSTGRES_HOST}
+      PG_META_DB_PORT: ${POSTGRES_PORT}
+      PG_META_DB_NAME: ${POSTGRES_DB}
+      PG_META_DB_USER: supabase_admin
+      PG_META_DB_PASSWORD: ${POSTGRES_PASSWORD}
+
+  dbmate:
+    container_name: ${CONTAINER_PREFIX}_dbmate_${CONTAINER_POSTFIX}
+    image: docker.io/amacneil/dbmate:1.16.2
+    depends_on:
+      db:
+        condition: service_healthy
+      storage:
+        condition: service_healthy
+    volumes:
+      - ./dbmate-entrypoint.sh:/entrypoint.sh:Z
+    environment:
+      DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD}@${POSTGRES_HOST}:${POSTGRES_PORT}/${POSTGRES_DB}?sslmode=disable
+      KONG_URL: http://${CONTAINER_PREFIX}_kong_${CONTAINER_POSTFIX}:${KONG_HTTP_PORT}
+      DBMATE_MIGRATIONS_DIR: /db/migrations
+      SERVICE_KEY: ${SERVICE_ROLE_KEY}
+    entrypoint: ["sh"]
+    command: [ "-c", "/entrypoint.sh"]
+
+  chatbot:
+    pull_policy: build
+    build:
+      args:
+        VERSION: main
+        NEXT_PUBLIC_SUPABASE_URL: ${SCHEME}://${SUPABASE_SUBDOMAIN}.${DOMAIN}
+        NEXT_PUBLIC_SUPABASE_ANON_KEY: ${ANON_KEY}
+        SUPABASE_SERVICE_ROLE_KEY: ${SERVICE_ROLE_KEY}
+      context: .
+      ulimits:
+        nofile:
+          soft: 10000
+          hard: 10000
+      tags:
+         - "chatbot-ui:test"
+    container_name: ${CONTAINER_PREFIX}_${CHATBOTUI_SUBDOMAIN}.${DOMAIN}_${CONTAINER_POSTFIX}
+    image: chatbot-ui:test
+    depends_on:
+      auth:
+        condition: service_healthy
+      kong:
+        condition: service_healthy
+      storage:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "require('http').get('http://127.0.0.1:3000/api/profile', (r) => {if (r.statusCode !== 200) throw new Error(r.statusCode)})"
+        ]
+      timeout: 5s
+      interval: 5s
+      retries: 3
+    links:
+      - nginx:${CHATBOTUI_SUBDOMAIN}.${DOMAIN}
+      - nginx:${SUPABASE_SUBDOMAIN}.${DOMAIN}
+
+  nginx:
+    container_name: nginx_chatbotui
+    image: docker.io/nginx:bookworm
+    depends_on:
+      dbmate:
+        condition: service_completed_successfully
+    restart: on-failure:3
+    ports:
+      - 80:80
+      - 443:443
+    volumes:
+      - ./chatbot-ui.conf.template:/etc/nginx/templates/chatbot-ui.conf.template:Z
+    environment:
+      CONTAINER_PREFIX: ${CONTAINER_PREFIX}
+      CONTAINER_POSTFIX: ${CONTAINER_POSTFIX}
+      DOMAIN: ${DOMAIN}
+      RESOLVER: ${RESOLVER}
+      SUPABASE_SUBDOMAIN: ${SUPABASE_SUBDOMAIN}
+      KONG_HTTP_PORT: ${KONG_HTTP_PORT}
+      CHATBOTUI_SUBDOMAIN: ${CHATBOTUI_SUBDOMAIN}
+      STUDIO_SUBDOMAIN: ${STUDIO_SUBDOMAIN}
+      STUDIO_PORT: ${STUDIO_PORT}

@@ -1,0 +1,126 @@
+_format_version: "1.1"
+services:
+  - name: auth-v1-open
+    _comment: "GoTrue: /auth/v1/verify* -> http://auth:9999/verify*"
+    url: http://supabase_auth_chatbotui:9999/verify
+    routes:
+      - name: auth-v1-open
+        strip_path: true
+        paths:
+          - /auth/v1/verify
+    plugins:
+      - name: cors
+  - name: auth-v1-open-callback
+    _comment: "GoTrue: /auth/v1/callback* -> http://auth:9999/callback*"
+    url: http://supabase_auth_chatbotui:9999/callback
+    routes:
+      - name: auth-v1-open-callback
+        strip_path: true
+        paths:
+          - /auth/v1/callback
+    plugins:
+      - name: cors
+  - name: auth-v1-open-authorize
+    _comment: "GoTrue: /auth/v1/authorize* -> http://auth:9999/authorize*"
+    url: http://supabase_auth_chatbotui:9999/authorize
+    routes:
+      - name: auth-v1-open-authorize
+        strip_path: true
+        paths:
+          - /auth/v1/authorize
+    plugins:
+      - name: cors
+  - name: auth-v1
+    _comment: "GoTrue: /auth/v1/* -> http://auth:9999/*"
+    url: http://supabase_auth_chatbotui:9999/
+    routes:
+      - name: auth-v1-all
+        strip_path: true
+        paths:
+          - /auth/v1/
+    plugins:
+      - name: cors
+  - name: rest-v1
+    _comment: "PostgREST: /rest/v1/* -> http://rest:3000/*"
+    url: http://supabase_rest_chatbotui:3000/
+    routes:
+      - name: rest-v1-all
+        strip_path: true
+        paths:
+          - /rest/v1/
+    plugins:
+      - name: cors
+  - name: rest-admin-v1
+    _comment: "PostgREST: /rest-admin/v1/* -> http://rest:3001/*"
+    url: http://supabase_rest_chatbotui:3001/
+    routes:
+      - name: rest-admin-v1-all
+        strip_path: true
+        paths:
+          - /rest-admin/v1/
+    plugins:
+      - name: cors
+  - name: graphql-v1
+    _comment: "PostgREST: /graphql/v1 -> http://rest:3000/rpc/graphql"
+    url: http://supabase_rest_chatbotui:3000/rpc/graphql
+    routes:
+      - name: graphql-v1-all
+        strip_path: true
+        paths:
+          - /graphql/v1
+    plugins:
+      - name: cors
+      - name: request-transformer
+        config:
+          add:
+            headers:
+              - "Content-Profile: graphql_public"
+  - name: realtime-v1
+    _comment: "Realtime: /realtime/v1/* -> ws://realtime:4000/socket/*"
+    url: http://realtime-dev.supabase_realtime_chatbotui:4000/socket
+    routes:
+      - name: realtime-v1-all
+        strip_path: true
+        paths:
+          - /realtime/v1/
+    plugins:
+      - name: cors
+  - name: storage-v1
+    _comment: "Storage: /storage/v1/* -> http://storage-api:5000/*"
+    url: http://supabase_storage_chatbotui:5000/
+    routes:
+      - name: storage-v1-all
+        strip_path: true
+        paths:
+          - /storage/v1/
+    plugins:
+      - name: cors
+      - name: request-transformer
+        config:
+          add:
+            headers:
+              - "Forwarded: host=127.0.0.1:54321/storage/v1;proto=http"
+  - name: pg-meta
+    _comment: "pg-meta: /pg/* -> http://pg-meta:8080/*"
+    url: http://supabase_pg_meta_chatbotui:8080/
+    routes:
+      - name: pg-meta-all
+        strip_path: true
+        paths:
+          - /pg/
+  - name: functions-v1
+    _comment: "Functions: /functions/v1/* -> http://edge-runtime:8081/*"
+    url: http://supabase_edge_runtime_chatbotui:8081/
+    routes:
+      - name: functions-v1-all
+        strip_path: true
+        paths:
+          - /functions/v1/
+  - name: analytics-v1
+    _comment: "Analytics: /analytics/v1/* -> http://logflare:4000/*"
+    url: http://supabase_analytics_chatbotui:4000/
+    routes:
+      - name: analytics-v1-all
+        strip_path: true
+        paths:
+          - /analytics/v1/
